@@ -1,53 +1,62 @@
-# E-Commerce Web Module Platform Backend
+# E-Commerce Web Module Platform Backend (FastAPI)
 
-A minimal, high-performance REST API backend powering the E-Commerce Web Module Platform catalogue, source code viewer, upload registry, and zip downloader.
+A high-performance REST API backend powering the E-Commerce Web Module Platform catalogue, source code viewer, upload registry, and zip downloader.
 
-Built with **Node.js**, **Express**, **TypeScript**, and **PostgreSQL**.
+Built with **Python 3.9+**, **FastAPI**, **Uvicorn**, and **PostgreSQL (`psycopg2-binary`)**.
 
 ---
 
 ## 🚀 Quick Start
 
 ### 1. Prerequisites
-- Node.js >= 18
+- Python >= 3.9
 - PostgreSQL >= 13
 
-### 2. Install Dependencies
+### 2. Setup Virtual Environment
 ```bash
-npm install
+# Create and activate virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# Install dependencies
+pip install -r requirements.txt
 ```
 
 ### 3. Environment Variables
 Copy `.env.example` to `.env` and configure your PostgreSQL database connection:
 ```env
 PORT=4000
+HOST=0.0.0.0
 DATABASE_URL=postgresql://username:password@localhost:5432/moduleforge
 CORS_ORIGIN=*
-NODE_ENV=development
+ENVIRONMENT=development
 ```
 
 ### 4. Initialize Database & Seed
 ```bash
 # Creates the 5 core tables and indexes
-npm run db:init
+python database/init_db.py
 
 # Optional: seed categories and sample modules
-npm run db:seed
+python database/seed_db.py
 ```
 
 ### 5. Run the Server
 ```bash
-# Development mode with hot-reloading
-npm run dev
+# Run with Python
+python main.py
 
-# Build and production start
-npm run build
-npm start
+# Or directly with Uvicorn
+uvicorn app.main:app --reload --port 4000 --host 0.0.0.0
 ```
+
+Interactive API documentation will be available at:
+- Swagger UI: `http://localhost:4000/docs`
+- ReDoc: `http://localhost:4000/redoc`
 
 ### 6. Run Automated Tests
 ```bash
-npm test
+pytest tests/ -v
 ```
 
 ---
@@ -95,4 +104,3 @@ All responses follow the standard JSON response format expected by the frontend:
 | `GET` | `/api/modules/stats` | Platform totals (`publishedModules`, `totalDownloads`) |
 | `GET` | `/api/modules/featured` | Top downloaded / featured modules |
 | `GET` | `/api/health` | Service health status & database connectivity |
-

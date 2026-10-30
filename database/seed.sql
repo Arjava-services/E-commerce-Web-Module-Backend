@@ -174,3 +174,4 @@ SELECT m.id, t.id
 FROM modules m, tags t
 WHERE m.slug = 'shopping-cart-drawer' AND t.slug IN ('react', 'typescript', 'cart', 'ui-component')
 ON CONFLICT DO NOTHING;
+

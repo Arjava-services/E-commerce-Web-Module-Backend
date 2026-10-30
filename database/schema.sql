@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS categories (
 );
 
 -- 2. modules
--- Core module entity containing metadata, category linkage, framework, and stats
+-- Core module entity containing metadata, category linkage, framework, and metrics
 CREATE TABLE IF NOT EXISTS modules (
     id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     slug TEXT NOT NULL UNIQUE,
@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS module_versions (
     "isLatest" BOOLEAN NOT NULL DEFAULT true,
     status TEXT NOT NULL DEFAULT 'PUBLISHED',
     "createdAt" TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    "updatedAt" TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT uq_module_version UNIQUE ("moduleId", version)
 );
 
