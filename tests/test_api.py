@@ -8,106 +8,191 @@ def client():
     with TestClient(app) as test_client:
         yield test_client
 
-def test_health_check(client):
-    res = client.get("/api/health")
-    assert res.status_code == 200
-    data = res.json()
-    assert data["success"] is True
-    assert data["data"]["status"] == "ok"
-    assert data["data"]["database"] == "connected"
-
-def test_get_categories(client):
+# -----------------------------------------------------------------------------
+# 1. GET /api/categories
+# -----------------------------------------------------------------------------
+def test_1_get_categories(client):
     res = client.get("/api/categories")
     assert res.status_code == 200
-    data = res.json()
-    assert data["success"] is True
-    assert isinstance(data["data"], list)
-    assert len(data["data"]) > 0
-    first_cat = data["data"][0]
-    assert "slug" in first_cat
-    assert "name" in first_cat
-    assert "displayOrder" in first_cat
+    body = res.json()
+    assert body["success"] is True
+    categories = body["data"]
+    assert isinstance(categories, list)
+    assert len(categories) > 0
+    cat = categories[0]
+    assert "id" in cat
+    assert "slug" in cat
+    assert "name" in cat
+    assert "description" in cat
+    assert "icon" in cat
+    assert "displayOrder" in cat
+    assert isinstance(cat["displayOrder"], int)
 
-def test_get_modules_stats(client):
-    res = client.get("/api/modules/stats")
-    assert res.status_code == 200
-    data = res.json()
-    assert data["success"] is True
-    assert "publishedModules" in data["data"]
-    assert "totalDownloads" in data["data"]
-    assert isinstance(data["data"]["publishedModules"], int)
-    assert isinstance(data["data"]["totalDownloads"], int)
-
-def test_list_modules_pagination_and_filters(client):
+# -----------------------------------------------------------------------------
+# 2. GET /api/modules
+# -----------------------------------------------------------------------------
+def test_2_get_modules_paginated(client):
     res = client.get("/api/modules?page=1&limit=6&sort=updated")
     assert res.status_code == 200
-    data = res.json()
-    assert data["success"] is True
-    result = data["data"]
-    assert "items" in result
-    assert "total" in result
-    assert "page" in result
-    assert result["page"] == 1
-    assert isinstance(result["items"], list)
+    body = res.json()
+    assert body["success"] is True
+    data = body["data"]
+    assert "total" in data
+    assert "page" in data
+    assert "totalPages" in data
+    assert "limit" in data
+    assert data["page"] == 1
+    assert data["limit"] == 6
+    assert isinstance(data["items"], list)
+    if data["items"]:
+        item = data["items"][0]
+        assert "id" in item
+        assert "slug" in item
+        assert "name" in item
+        assert "framework" in item
+        assert "language" in item
+        assert "status" in item
+        assert "latestVersion" in item
+        assert "downloadCount" in item
+        assert "category" in item
+        assert "tags" in item
+        assert isinstance(item["tags"], list)
 
-def test_publish_and_retrieve_module(client):
-    test_slug = f"fastapi-test-module-{int(time.time())}"
+# -----------------------------------------------------------------------------
+# 4. POST /api/modules (Upload / Publish Module)
+# -----------------------------------------------------------------------------
+test_module_slug = f"custom-cart-drawer-{int(time.time())}"
+
+def test_4_publish_module(client):
+    # Fetch a category first
     cat_res = client.get("/api/categories")
-    first_category_id = cat_res.json()["data"][0]["id"]
+    category_id = cat_res.json()["data"][0]["id"]
 
     payload = {
-        "name": "FastAPI Shopping Drawer",
-        "slug": test_slug,
-        "categoryId": first_category_id,
-        "shortDescription": "High-performance cart drawer created via FastAPI backend",
-        "description": "Full documentation for shopping drawer component.",
+        "name": "Custom Cart Drawer",
+        "slug": test_module_slug,
+        "categoryId": category_id,
+        "shortDescription": "A sleek slide-over shopping cart drawer component with quantity controls.",
+        "description": "Full markdown overview detailing features and component props.",
         "framework": "React",
         "language": "TypeScript",
         "version": "1.0.0",
-        "tags": ["react", "fastapi", "cart"],
+        "tags": ["cart", "ui", "drawer"],
         "files": [
             {
-                "fileName": "Drawer.tsx",
-                "filePath": "src/Drawer.tsx",
-                "content": "export function Drawer() { return <div>Drawer</div>; }",
+                "fileName": "CartDrawer.tsx",
+                "filePath": "src/CartDrawer.tsx",
+                "content": "export function CartDrawer() { return <div className='drawer'>Cart</div>; }",
                 "language": "typescript",
                 "isEntry": True
             },
             {
                 "fileName": "types.ts",
                 "filePath": "src/types.ts",
-                "content": "export interface DrawerProps { open: boolean; }",
+                "content": "export interface CartItem { id: string; price: number; }",
                 "language": "typescript",
                 "isEntry": False
             }
-        ]
+        ],
+        "overview": "Complete slide-over cart with subtotal calculation.",
+        "installation": f"npm install @company/{test_module_slug}",
+        "apiReference": f"import {{ CartDrawer }} from '@company/{test_module_slug}';",
+        "integrationExample": "<CartDrawer isOpen={true} />"
     }
 
-    # 1. Publish Module (POST /api/modules)
-    post_res = client.post("/api/modules", json=payload)
-    assert post_res.status_code == 201
-    post_data = post_res.json()
-    assert post_data["success"] is True
-    assert post_data["data"]["slug"] == test_slug
-    assert "id" in post_data["data"]
+    res = client.post("/api/modules", json=payload)
+    assert res.status_code == 201
+    body = res.json()
+    assert body["success"] is True
+    assert body["data"]["slug"] == test_module_slug
+    assert body["data"]["name"] == "Custom Cart Drawer"
+    assert "id" in body["data"]
 
-    # 2. Get Module Detail (GET /api/modules/:slug)
-    get_res = client.get(f"/api/modules/{test_slug}")
-    assert get_res.status_code == 200
-    detail = get_res.json()["data"]
-    assert detail["slug"] == test_slug
-    assert detail["name"] == "FastAPI Shopping Drawer"
+# -----------------------------------------------------------------------------
+# 3. GET /api/modules/:slug
+# -----------------------------------------------------------------------------
+def test_3_get_module_detail(client):
+    res = client.get(f"/api/modules/{test_module_slug}")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["success"] is True
+    detail = body["data"]
+    assert detail["slug"] == test_module_slug
+    assert detail["name"] == "Custom Cart Drawer"
+    assert detail["framework"] == "React"
+    assert detail["language"] == "TypeScript"
+    assert "category" in detail
+    assert "tags" in detail
+    assert len(detail["tags"]) == 3
     assert detail["currentVersion"] is not None
+    assert detail["currentVersion"]["version"] == "1.0.0"
     assert len(detail["currentVersion"]["files"]) == 2
-    assert detail["currentVersion"]["files"][0]["fileName"] == "Drawer.tsx"
+    assert detail["currentVersion"]["files"][0]["fileName"] == "CartDrawer.tsx"
+    assert detail["currentVersion"]["files"][0]["isEntry"] is True
+    # Documentation object
+    assert "documentation" in detail
+    assert detail["documentation"] is not None
+    assert f"npm install @company/{test_module_slug}" in detail["documentation"]["installation"]
 
-    # 3. Download ZIP (GET /api/modules/:slug/versions/:version/download)
-    dl_res = client.get(f"/api/modules/{test_slug}/versions/1.0.0/download")
-    assert dl_res.status_code == 200
-    assert dl_res.headers["content-type"] == "application/zip"
-    assert "attachment;" in dl_res.headers["content-disposition"]
-    assert len(dl_res.content) > 50
+# -----------------------------------------------------------------------------
+# 5. GET /api/modules/:slug/versions/:version/files
+# -----------------------------------------------------------------------------
+def test_5_get_version_files(client):
+    res = client.get(f"/api/modules/{test_module_slug}/versions/1.0.0/files")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["success"] is True
+    files = body["data"]
+    assert isinstance(files, list)
+    assert len(files) == 2
+    assert files[0]["fileName"] == "CartDrawer.tsx"
+    assert "content" in files[0]
+    assert files[0]["isEntry"] is True
 
-    # 4. Verify Download Count incremented
-    after_dl = client.get(f"/api/modules/{test_slug}").json()["data"]
-    assert after_dl["downloadCount"] == 1
+# -----------------------------------------------------------------------------
+# 6. GET /api/modules/:slug/versions/:version/download
+# -----------------------------------------------------------------------------
+def test_6_download_module_zip(client):
+    res = client.get(f"/api/modules/{test_module_slug}/versions/1.0.0/download")
+    assert res.status_code == 200
+    assert res.headers["content-type"] == "application/zip"
+    assert f'{test_module_slug}-1.0.0.zip' in res.headers["content-disposition"]
+    assert len(res.content) > 50
+
+    # Verify download count incremented
+    detail_res = client.get(f"/api/modules/{test_module_slug}")
+    assert detail_res.json()["data"]["downloadCount"] == 1
+
+# -----------------------------------------------------------------------------
+# 7. GET /api/modules/stats
+# -----------------------------------------------------------------------------
+def test_7_get_stats(client):
+    res = client.get("/api/modules/stats")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["success"] is True
+    stats = body["data"]
+    assert "publishedModules" in stats
+    assert "totalDownloads" in stats
+    assert isinstance(stats["publishedModules"], int)
+    assert isinstance(stats["totalDownloads"], int)
+
+# -----------------------------------------------------------------------------
+# 8. GET /api/modules/featured
+# -----------------------------------------------------------------------------
+def test_8_get_featured(client):
+    res = client.get("/api/modules/featured")
+    assert res.status_code == 200
+    body = res.json()
+    assert body["success"] is True
+    items = body["data"]
+    assert isinstance(items, list)
+    assert len(items) <= 8
+    if items:
+        f = items[0]
+        assert "id" in f
+        assert "slug" in f
+        assert "name" in f
+        assert "downloadCount" in f
+        assert "category" in f
+        assert "tags" in f

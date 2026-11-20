@@ -6,8 +6,11 @@ router = APIRouter(prefix="/categories", tags=["Categories"])
 @router.get("")
 def get_categories():
     """
-    Returns the list of categories for the catalogue sidebar and upload form.
-    Response: Array of { id, slug, name, description, icon, displayOrder, moduleCount }
+    1. GET /api/categories
+    Used by the navigation sidebar, categories page, and module upload dropdown.
+    Response data: Array<Category>
+      id (string), slug (string), name (string), description (string),
+      icon (string), displayOrder (number), moduleCount (number, optional)
     """
     try:
         col_order = "`displayOrder`" if is_mysql else '"displayOrder"'
@@ -20,7 +23,7 @@ def get_categories():
                 c.name, 
                 c.description, 
                 c.icon, 
-                c.{col_order} AS displayOrder,
+                c.{col_order} AS {col_order},
                 COUNT(m.id) AS moduleCount
             FROM categories c
             LEFT JOIN modules m ON c.id = m.{col_cat_id} AND m.status = 'PUBLISHED'
@@ -31,13 +34,20 @@ def get_categories():
             cur.execute(sql)
             categories = cur.fetchall()
 
-        # Format rows cleanly
         formatted = []
         for cat in categories:
             row = dict(cat)
-            row["displayOrder"] = int(row.get("displayOrder") or 0)
-            row["moduleCount"] = int(row.get("moduleCount") or 0)
-            formatted.append(row)
+            disp_order = row.get("displayOrder") or row.get("displayorder") or 0
+            mod_count = row.get("moduleCount") or row.get("modulecount") or 0
+            formatted.append({
+                "id": str(row["id"]),
+                "slug": str(row["slug"]),
+                "name": str(row["name"]),
+                "description": row.get("description") or "",
+                "icon": row.get("icon") or "Package",
+                "displayOrder": int(disp_order),
+                "moduleCount": int(mod_count),
+            })
 
         return {
             "success": True,

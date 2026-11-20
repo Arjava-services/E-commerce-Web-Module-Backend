@@ -23,11 +23,44 @@ def slugify(text: str) -> str:
     text = re.sub(r'[^a-z0-9]+', '-', text)
     return text.strip('-')
 
-# 1. GET /api/modules/stats
+def fetch_tags_for_modules(cur, module_ids: list) -> dict:
+    if not module_ids:
+        return {}
+    placeholders = ', '.join(['%s'] * len(module_ids))
+    tags_sql = f"""
+        SELECT t.id, t.slug, t.name, mt.{q("moduleId")} AS moduleId
+        FROM tags t
+        JOIN module_tags mt ON t.id = mt.{q("tagId")}
+        WHERE mt.{q("moduleId")} IN ({placeholders})
+        ORDER BY t.name ASC
+    """
+    cur.execute(tags_sql, module_ids)
+    rows = cur.fetchall()
+    tags_by_module = {}
+    for r in rows:
+        d = dict(r)
+        m_id = str(d.get("moduleId") or d.get("moduleid"))
+        if m_id not in tags_by_module:
+            tags_by_module[m_id] = []
+        tags_by_module[m_id].append({
+            "id": str(d["id"]),
+            "slug": str(d["slug"]),
+            "name": str(d["name"]),
+        })
+    return tags_by_module
+
+
+# ============================================================================
+# 7. GET /api/modules/stats
+# ============================================================================
 @router.get("/stats")
 def get_stats():
     """
-    Returns platform statistics: publishedModules and totalDownloads
+    7. GET /api/modules/stats
+    Used by the home page stats counter banner.
+    Response data:
+      publishedModules (number): e.g. 122
+      totalDownloads (number): e.g. 780
     """
     try:
         sql = f"""
@@ -54,11 +87,16 @@ def get_stats():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 2. GET /api/modules/featured
+
+# ============================================================================
+# 8. GET /api/modules/featured
+# ============================================================================
 @router.get("/featured")
 def get_featured():
     """
-    Returns top featured/downloaded modules
+    8. GET /api/modules/featured
+    Used by the home page to populate the featured showcase section.
+    Response data: Array of 4 to 8 ModuleSummary objects
     """
     try:
         sql = f"""
@@ -92,20 +130,42 @@ def get_featured():
             cur.execute(sql)
             rows = cur.fetchall()
 
-        items = []
-        for r in rows:
-            item = dict(r)
-            cat_id = item.pop("cat_id", None)
-            cat_name = item.pop("cat_name", None)
-            cat_slug = item.pop("cat_slug", None)
-            cat_icon = item.pop("cat_icon", None)
-            item["category"] = {
-                "id": cat_id,
-                "name": cat_name,
-                "slug": cat_slug,
-                "icon": cat_icon,
-            } if cat_name else None
-            items.append(item)
+            items = []
+            module_ids = []
+            for r in rows:
+                item = dict(r)
+                m_id = str(item["id"])
+                module_ids.append(m_id)
+                cat_id = item.pop("cat_id", None)
+                cat_name = item.pop("cat_name", None)
+                cat_slug = item.pop("cat_slug", None)
+                cat_icon = item.pop("cat_icon", None)
+                dl_count = item.get("downloadCount") or item.get("downloadcount") or 0
+                latest_ver = item.get("latestVersion") or item.get("latestversion") or "1.0.0"
+
+                items.append({
+                    "id": m_id,
+                    "slug": str(item["slug"]),
+                    "name": str(item["name"]),
+                    "shortDescription": item.get("shortDescription") or item.get("shortdescription") or "",
+                    "framework": str(item.get("framework") or "React"),
+                    "language": str(item.get("language") or "TypeScript"),
+                    "status": str(item.get("status") or "PUBLISHED"),
+                    "latestVersion": str(latest_ver),
+                    "downloadCount": int(dl_count),
+                    "category": {
+                        "id": str(cat_id) if cat_id else None,
+                        "slug": str(cat_slug or ""),
+                        "name": str(cat_name or ""),
+                        "icon": str(cat_icon or "Package"),
+                    } if cat_slug else None,
+                    "tags": [],
+                })
+
+            # Fetch tags
+            tags_map = fetch_tags_for_modules(cur, module_ids)
+            for item in items:
+                item["tags"] = tags_map.get(item["id"], [])
 
         return {
             "success": True,
@@ -114,19 +174,30 @@ def get_featured():
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 3. GET /api/modules
+
+# ============================================================================
+# 2. GET /api/modules
+# ============================================================================
 @router.get("")
 def list_modules(
-    page: int = Query(1, ge=1),
-    limit: int = Query(12, ge=1, le=100),
+    search: Optional[str] = Query(None),
     category: Optional[str] = Query(None),
     framework: Optional[str] = Query(None),
-    search: Optional[str] = Query(None),
     sort: Optional[str] = Query("updated"),
+    page: int = Query(1, ge=1),
+    limit: int = Query(12, ge=1, le=100),
     status_filter: Optional[str] = Query("PUBLISHED", alias="status")
 ):
     """
-    Query catalogue with filtering, searching, sorting, and pagination
+    2. GET /api/modules
+    Used by the main catalog page for searching, filtering, sorting, and pagination.
+    Query Params (all optional):
+      search (string), category (string), framework (string),
+      sort (string): "updated", "alphabetical", "downloads", "views"
+      page (number, default: 1), limit (number, default: 12)
+    Response data (Paginated Object):
+      total (number), page (number), totalPages (number), limit (number),
+      items (Array<ModuleSummary>)
     """
     try:
         offset = (page - 1) * limit
@@ -148,7 +219,7 @@ def list_modules(
             conditions.append("m.framework LIKE %s" if is_mysql else "m.framework ILIKE %s")
             values.append(framework)
 
-        # Search filter
+        # Search filter (matching name, slug, description, shortDescription)
         if search and search.strip():
             term = f"%{search.strip()}%"
             like_op = "LIKE" if is_mysql else "ILIKE"
@@ -159,19 +230,19 @@ def list_modules(
 
         where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
-        # Order by
-        order_by = f'm.{q("updatedAt")} DESC'
-        if sort == "downloads":
+        # Sorting logic: "updated", "alphabetical", "downloads", "views"
+        if sort == "alphabetical":
+            order_by = 'm.name ASC'
+        elif sort == "downloads":
             order_by = f'm.{q("downloadCount")} DESC, m.{q("updatedAt")} DESC'
-        elif sort == "newest":
-            order_by = f'm.{q("createdAt")} DESC'
-        elif sort == "name":
-            order_by = "m.name ASC"
-        elif sort == "updated":
+        elif sort == "views":
+            order_by = f'm.{q("downloadCount")} DESC, m.{q("updatedAt")} DESC'
+        else:
+            # "updated" (default)
             order_by = f'm.{q("updatedAt")} DESC'
 
         with get_cursor() as cur:
-            # Count total
+            # Total count
             count_sql = f"""
                 SELECT COUNT(m.id) AS total
                 FROM modules m
@@ -183,7 +254,7 @@ def list_modules(
             total = int(count_row.get("total") if count_row else 0)
             total_pages = math.ceil(total / limit) if total > 0 else 1
 
-            # Fetch items
+            # Select paginated items
             data_sql = f"""
                 SELECT 
                     m.id,
@@ -194,8 +265,6 @@ def list_modules(
                     m.language,
                     m.status,
                     m.{q("downloadCount")} AS {q("downloadCount")},
-                    m.{q("createdAt")} AS {q("createdAt")},
-                    m.{q("updatedAt")} AS {q("updatedAt")},
                     c.id AS cat_id,
                     c.name AS cat_name,
                     c.slug AS cat_slug,
@@ -216,40 +285,75 @@ def list_modules(
             cur.execute(data_sql, values + [limit, offset])
             rows = cur.fetchall()
 
-        items = []
-        for r in rows:
-            item = dict(r)
-            cat_id = item.pop("cat_id", None)
-            cat_name = item.pop("cat_name", None)
-            cat_slug = item.pop("cat_slug", None)
-            cat_icon = item.pop("cat_icon", None)
-            item["category"] = {
-                "id": cat_id,
-                "name": cat_name,
-                "slug": cat_slug,
-                "icon": cat_icon,
-            } if cat_name else None
-            items.append(item)
+            items = []
+            module_ids = []
+            for r in rows:
+                item = dict(r)
+                m_id = str(item["id"])
+                module_ids.append(m_id)
+                cat_id = item.pop("cat_id", None)
+                cat_name = item.pop("cat_name", None)
+                cat_slug = item.pop("cat_slug", None)
+                cat_icon = item.pop("cat_icon", None)
+                dl_count = item.get("downloadCount") or item.get("downloadcount") or 0
+                latest_ver = item.get("latestVersion") or item.get("latestversion") or "1.0.0"
+
+                items.append({
+                    "id": m_id,
+                    "slug": str(item["slug"]),
+                    "name": str(item["name"]),
+                    "shortDescription": item.get("shortDescription") or item.get("shortdescription") or "",
+                    "framework": str(item.get("framework") or "React"),
+                    "language": str(item.get("language") or "TypeScript"),
+                    "status": str(item.get("status") or "PUBLISHED"),
+                    "latestVersion": str(latest_ver),
+                    "downloadCount": int(dl_count),
+                    "category": {
+                        "id": str(cat_id) if cat_id else None,
+                        "slug": str(cat_slug or ""),
+                        "name": str(cat_name or ""),
+                        "icon": str(cat_icon or "Package"),
+                    } if cat_slug else None,
+                    "tags": [],
+                })
+
+            # Fetch tags
+            tags_map = fetch_tags_for_modules(cur, module_ids)
+            for item in items:
+                item["tags"] = tags_map.get(item["id"], [])
 
         return {
             "success": True,
             "data": {
-                "items": items,
                 "total": total,
                 "page": page,
                 "totalPages": total_pages,
+                "limit": limit,
+                "items": items,
             }
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 4. POST /api/modules (Upload / Publish)
+
+# ============================================================================
+# 4. POST /api/modules (Upload / Publish Module)
+# ============================================================================
 @router.post("", status_code=status.HTTP_201_CREATED)
 def publish_module(payload: ModuleUploadPayload):
     """
-    Publish a new module or release a new version with source code files
+    4. POST /api/modules
+    Used when a developer publishes a module from /upload.
+    Request Body:
+      name (string), slug (string), categoryId (string), shortDescription (string),
+      description (string, optional), framework (string), language (string),
+      version (string), tags (Array<string>), files (Array<FileObject>),
+      overview (optional), installation (optional), apiReference (optional),
+      integrationExample (optional)
+    Response data:
+      id (string), slug (string), name (string)
     """
-    slug = (payload.slug or slugify(payload.name)).strip()
+    slug = slugify(payload.slug or payload.name)
     if not slug:
         slug = f"module-{int(time.time())}"
 
@@ -258,7 +362,7 @@ def publish_module(payload: ModuleUploadPayload):
 
     with get_db() as conn:
         with conn.cursor() as cur:
-            # 1. Resolve Category ID (UUID or slug)
+            # 1. Resolve Category ID (by UUID or slug)
             cur.execute(
                 'SELECT id FROM categories WHERE id = %s OR slug = %s LIMIT 1',
                 (payload.categoryId, payload.categoryId)
@@ -369,7 +473,7 @@ def publish_module(payload: ModuleUploadPayload):
                 new_ver = cur.fetchone()
                 version_id = new_ver[0] if isinstance(new_ver, (list, tuple)) else new_ver["id"]
 
-            # 5. Insert files
+            # 5. Insert Files
             cur.execute(f'DELETE FROM module_files WHERE {q("moduleVersionId")} = %s', (version_id,))
             insert_file_sql = f"""
                 INSERT INTO module_files (
@@ -419,19 +523,122 @@ def publish_module(payload: ModuleUploadPayload):
                     )
                     cur.execute(link_sql, (module_id, tag_id))
 
+            # 7. Documentation (check if documentation table exists first)
+            doc_overview = payload.overview or desc
+            doc_install = payload.installation or f"npm install @company/{slug}"
+            clean_comp_name = re.sub(r'[^a-zA-Z0-9]', '', payload.name)
+            doc_api = payload.apiReference or f"import {{ {clean_comp_name} }} from '@company/{slug}';"
+            doc_example = payload.integrationExample or (payload.files[0].content if payload.files else "")
+
+            table_check_sql = (
+                "SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'documentation'"
+                if is_mysql else
+                "SELECT 1 FROM information_schema.tables WHERE table_name = 'documentation'"
+            )
+            cur.execute(table_check_sql)
+            if cur.fetchone():
+                if is_mysql:
+                    cur.execute(
+                        f"""
+                        INSERT INTO documentation (id, {q("moduleId")}, overview, installation, {q("apiReference")}, {q("integrationExample")}, {q("updatedAt")})
+                        VALUES ({gen_uuid_sql()}, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                        ON DUPLICATE KEY UPDATE
+                            overview = VALUES(overview),
+                            installation = VALUES(installation),
+                            {q("apiReference")} = VALUES({q("apiReference")}),
+                            {q("integrationExample")} = VALUES({q("integrationExample")}),
+                            {q("updatedAt")} = CURRENT_TIMESTAMP;
+                        """,
+                        (module_id, doc_overview, doc_install, doc_api, doc_example)
+                    )
+                else:
+                    cur.execute(
+                        f"""
+                        INSERT INTO documentation (id, {q("moduleId")}, overview, features, prerequisites, installation, configuration, {q("envVariables")}, {q("apiReference")}, {q("integrationExample")}, {q("testingInstructions")}, {q("updatedAt")})
+                        VALUES ({gen_uuid_sql()}, %s, %s, '[]', '', %s, '', '[]', %s, %s, '', CURRENT_TIMESTAMP)
+                        ON CONFLICT ({q("moduleId")}) DO UPDATE SET
+                            overview = EXCLUDED.overview,
+                            installation = EXCLUDED.installation,
+                            {q("apiReference")} = EXCLUDED.{q("apiReference")},
+                            {q("integrationExample")} = EXCLUDED.{q("integrationExample")},
+                            {q("updatedAt")} = CURRENT_TIMESTAMP;
+                        """,
+                        (module_id, doc_overview, doc_install, doc_api, doc_example)
+                    )
+
     return {
         "success": True,
         "data": {
-            "id": module_id,
-            "slug": slug,
+            "id": str(module_id),
+            "slug": str(slug),
+            "name": str(payload.name),
         }
     }
 
-# 5. GET /api/modules/{slug}/versions/{version}/download
+
+# ============================================================================
+# 5. GET /api/modules/:slug/versions/:version/files
+# ============================================================================
+@router.get("/{slug}/versions/{version}/files")
+def get_module_version_files(slug: str, version: str):
+    """
+    5. GET /api/modules/:slug/versions/:version/files
+    Used when a user selects a specific historical version in the code viewer.
+    Response data: Array<ModuleFile>
+      id, filePath, fileName, language, isEntry, content
+    """
+    try:
+        sql = f"""
+            SELECT 
+                f.id, 
+                f.{q("filePath")} AS {q("filePath")}, 
+                f.{q("fileName")} AS {q("fileName")}, 
+                f.language, 
+                f.content, 
+                f.{q("isEntry")} AS {q("isEntry")}
+            FROM module_files f
+            JOIN module_versions v ON f.{q("moduleVersionId")} = v.id
+            JOIN modules m ON v.{q("moduleId")} = m.id
+            WHERE m.slug = %s AND v.version = %s
+            ORDER BY f.{q("isEntry")} DESC, f.{q("filePath")} ASC
+        """
+        with get_cursor() as cur:
+            cur.execute(sql, (slug, version))
+            rows = cur.fetchall()
+
+        files = []
+        for r in rows:
+            d = dict(r)
+            f_path = d.get("filePath") or d.get("filepath")
+            f_name = d.get("fileName") or d.get("filename")
+            is_entry = bool(d.get("isEntry") or d.get("isentry"))
+            files.append({
+                "id": str(d["id"]),
+                "filePath": str(f_path),
+                "fileName": str(f_name),
+                "language": str(d.get("language") or "typescript"),
+                "isEntry": is_entry,
+                "content": str(d.get("content") or ""),
+            })
+
+        return {
+            "success": True,
+            "data": files
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# 6. GET /api/modules/:slug/versions/:version/download
+# ============================================================================
 @router.get("/{slug}/versions/{version}/download")
 def download_module_version(slug: str, version: str):
     """
-    Returns downloadable ZIP package of the module version and increments downloadCount
+    6. GET /api/modules/:slug/versions/:version/download
+    Used when a developer clicks the Download Package (ZIP) button.
+    Response: Binary Stream / File download (application/zip).
+    Increments downloadCount on the module.
     """
     with get_db() as conn:
         with conn.cursor() as cur:
@@ -504,11 +711,14 @@ def download_module_version(slug: str, version: str):
         }
     )
 
-# 6. GET /api/modules/{slug}/versions
+
+# ============================================================================
+# Companion: GET /api/modules/:slug/versions
+# ============================================================================
 @router.get("/{slug}/versions")
 def get_module_versions(slug: str):
     """
-    Returns list of versions for a given module
+    Returns list of all historical versions for a given module
     """
     try:
         sql = f"""
@@ -528,50 +738,40 @@ def get_module_versions(slug: str):
             cur.execute(sql, (slug,))
             versions = cur.fetchall()
 
+        formatted = []
+        for v in versions:
+            d = dict(v)
+            is_latest = bool(d.get("isLatest") or d.get("islatest"))
+            formatted.append({
+                "id": str(d["id"]),
+                "version": str(d["version"]),
+                "changelog": d.get("changelog") or "",
+                "isLatest": is_latest,
+                "status": d.get("status") or "PUBLISHED",
+                "createdAt": d.get("createdAt") or d.get("createdat"),
+            })
+
         return {
             "success": True,
-            "data": [dict(v) for v in versions]
+            "data": formatted
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-# 7. GET /api/modules/{slug}/versions/{version}/files
-@router.get("/{slug}/versions/{version}/files")
-def get_module_version_files(slug: str, version: str):
-    """
-    Returns files list for a given version
-    """
-    try:
-        sql = f"""
-            SELECT 
-                f.id, 
-                f.{q("filePath")} AS {q("filePath")}, 
-                f.{q("fileName")} AS {q("fileName")}, 
-                f.language, 
-                f.content, 
-                f.{q("isEntry")} AS {q("isEntry")}
-            FROM module_files f
-            JOIN module_versions v ON f.{q("moduleVersionId")} = v.id
-            JOIN modules m ON v.{q("moduleId")} = m.id
-            WHERE m.slug = %s AND v.version = %s
-            ORDER BY f.{q("isEntry")} DESC, f.{q("filePath")} ASC
-        """
-        with get_cursor() as cur:
-            cur.execute(sql, (slug, version))
-            files = cur.fetchall()
 
-        return {
-            "success": True,
-            "data": [dict(f) for f in files]
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# 8. GET /api/modules/{slug}
+# ============================================================================
+# 3. GET /api/modules/:slug
+# ============================================================================
 @router.get("/{slug}")
 def get_module_detail(slug: str):
     """
-    Module detail page (source code viewer, documentation, versions)
+    3. GET /api/modules/:slug
+    Used by the module detail page to display live preview, documentation, and source code.
+    Response data (Full Module Detail):
+      id, slug, name, shortDescription, description, framework, language,
+      status, downloadCount, category: { id, slug, name, icon },
+      tags: Array<Tag>, currentVersion: { id, version, changelog, files: Array<ModuleFile> },
+      documentation: { overview, installation, apiReference, integrationExample }
     """
     try:
         with get_cursor() as cur:
@@ -610,20 +810,21 @@ def get_module_detail(slug: str):
                 )
 
             module_item = dict(row)
+            m_id = str(module_item["id"])
             cat_id = module_item.pop("cat_id", None)
             cat_name = module_item.pop("cat_name", None)
             cat_slug = module_item.pop("cat_slug", None)
             cat_desc = module_item.pop("cat_desc", None)
             cat_icon = module_item.pop("cat_icon", None)
-            module_item["category"] = {
-                "id": cat_id,
-                "name": cat_name,
-                "slug": cat_slug,
-                "description": cat_desc,
-                "icon": cat_icon,
-            } if cat_name else None
-
             category_id = module_item.get("categoryId") or module_item.get("categoryid")
+            dl_count = module_item.get("downloadCount") or module_item.get("downloadcount") or 0
+
+            category_obj = {
+                "id": str(cat_id) if cat_id else None,
+                "slug": str(cat_slug or ""),
+                "name": str(cat_name or ""),
+                "icon": str(cat_icon or "Package"),
+            } if cat_slug else None
 
             # 2. Fetch Versions
             versions_sql = f"""
@@ -639,11 +840,23 @@ def get_module_detail(slug: str):
                 WHERE {q("moduleId")} = %s
                 ORDER BY {q("isLatest")} DESC, {q("createdAt")} DESC
             """
-            cur.execute(versions_sql, (module_item["id"],))
-            versions = [dict(v) for v in cur.fetchall()]
+            cur.execute(versions_sql, (m_id,))
+            raw_versions = cur.fetchall()
+
+            versions = []
+            for v in raw_versions:
+                vd = dict(v)
+                versions.append({
+                    "id": str(vd["id"]),
+                    "version": str(vd["version"]),
+                    "changelog": vd.get("changelog") or "",
+                    "isLatest": bool(vd.get("isLatest") or vd.get("islatest")),
+                    "status": vd.get("status") or "PUBLISHED",
+                    "createdAt": vd.get("createdAt") or vd.get("createdat"),
+                })
 
             # Find latest/current version
-            current_ver = next((v for v in versions if v.get("isLatest") or v.get("islatest")), versions[0] if versions else None)
+            current_ver = next((v for v in versions if v["isLatest"]), versions[0] if versions else None)
             current_version_with_files = None
 
             if current_ver:
@@ -660,22 +873,63 @@ def get_module_detail(slug: str):
                     ORDER BY {q("isEntry")} DESC, {q("filePath")} ASC
                 """
                 cur.execute(files_sql, (current_ver["id"],))
-                files = [dict(f) for f in cur.fetchall()]
-                current_version_with_files = dict(current_ver)
-                current_version_with_files["files"] = files
+                raw_files = cur.fetchall()
+                files = []
+                for f in raw_files:
+                    fd = dict(f)
+                    files.append({
+                        "id": str(fd["id"]),
+                        "filePath": str(fd.get("filePath") or fd.get("filepath")),
+                        "fileName": str(fd.get("fileName") or fd.get("filename")),
+                        "language": str(fd.get("language") or "typescript"),
+                        "isEntry": bool(fd.get("isEntry") or fd.get("isentry")),
+                        "content": str(fd.get("content") or ""),
+                    })
+
+                current_version_with_files = {
+                    "id": current_ver["id"],
+                    "version": current_ver["version"],
+                    "changelog": current_ver["changelog"],
+                    "files": files,
+                }
 
             # 3. Fetch Tags
-            tags_sql = f"""
-                SELECT t.id, t.slug, t.name
-                FROM tags t
-                JOIN module_tags mt ON t.id = mt.{q("tagId")}
-                WHERE mt.{q("moduleId")} = %s
-                ORDER BY t.name ASC
-            """
-            cur.execute(tags_sql, (module_item["id"],))
-            tags = [dict(t) for t in cur.fetchall()]
+            tags_map = fetch_tags_for_modules(cur, [m_id])
+            tags = tags_map.get(m_id, [])
 
-            # 4. Related modules
+            # 4. Fetch Documentation
+            doc = None
+            clean_comp_name = re.sub(r'[^a-zA-Z0-9]', '', str(module_item["name"]))
+            try:
+                cur.execute(
+                    f'SELECT overview, installation, {q("apiReference")} AS {q("apiReference")}, {q("integrationExample")} AS {q("integrationExample")} FROM documentation WHERE {q("moduleId")} = %s LIMIT 1',
+                    (m_id,)
+                )
+                doc_row = cur.fetchone()
+                if doc_row:
+                    dd = dict(doc_row)
+                    doc = {
+                        "overview": dd.get("overview") or module_item.get("description") or module_item.get("shortDescription") or "",
+                        "installation": dd.get("installation") or f"npm install @company/{slug}",
+                        "apiReference": dd.get("apiReference") or dd.get("apireference") or f"import {{ {clean_comp_name} }} from '@company/{slug}';",
+                        "integrationExample": dd.get("integrationExample") or dd.get("integrationexample") or "",
+                    }
+            except Exception:
+                pass
+
+            if not doc:
+                first_code = ""
+                if current_version_with_files and current_version_with_files.get("files"):
+                    first_code = current_version_with_files["files"][0]["content"]
+
+                doc = {
+                    "overview": module_item.get("description") or module_item.get("shortDescription") or "",
+                    "installation": f"npm install @company/{slug}",
+                    "apiReference": f"import {{ {clean_comp_name} }} from '@company/{slug}';",
+                    "integrationExample": first_code,
+                }
+
+            # 5. Related modules
             related_sql = f"""
                 SELECT 
                     m.id,
@@ -690,19 +944,40 @@ def get_module_detail(slug: str):
                 ORDER BY m.{q("downloadCount")} DESC
                 LIMIT 4
             """
-            cur.execute(related_sql, (category_id, module_item["id"]))
-            related_modules = [dict(r) for r in cur.fetchall()]
-
-        result = dict(module_item)
-        result["latestVersion"] = current_ver["version"] if current_ver else "1.0.0"
-        result["versions"] = versions
-        result["currentVersion"] = current_version_with_files
-        result["tags"] = tags
-        result["relatedModules"] = related_modules
+            cur.execute(related_sql, (category_id, m_id))
+            raw_related = cur.fetchall()
+            related_modules = []
+            for r in raw_related:
+                rd = dict(r)
+                related_modules.append({
+                    "id": str(rd["id"]),
+                    "slug": str(rd["slug"]),
+                    "name": str(rd["name"]),
+                    "shortDescription": rd.get("shortDescription") or rd.get("shortdescription") or "",
+                    "framework": str(rd.get("framework") or "React"),
+                    "language": str(rd.get("language") or "TypeScript"),
+                    "downloadCount": int(rd.get("downloadCount") or rd.get("downloadcount") or 0),
+                })
 
         return {
             "success": True,
-            "data": result
+            "data": {
+                "id": m_id,
+                "slug": str(module_item["slug"]),
+                "name": str(module_item["name"]),
+                "shortDescription": module_item.get("shortDescription") or module_item.get("shortdescription") or "",
+                "description": module_item.get("description") or "",
+                "framework": str(module_item.get("framework") or "React"),
+                "language": str(module_item.get("language") or "TypeScript"),
+                "status": str(module_item.get("status") or "PUBLISHED"),
+                "downloadCount": int(dl_count),
+                "category": category_obj,
+                "tags": tags,
+                "currentVersion": current_version_with_files,
+                "documentation": doc,
+                "versions": versions,
+                "relatedModules": related_modules,
+            }
         }
     except HTTPException:
         raise
